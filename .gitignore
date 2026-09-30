@@ -216,3 +216,42 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# =====================================================================
+# Project-specific rules (algo trading bot)
+# =====================================================================
+
+# --- Secrets: never commit these ---
+# Kite API key/secret and all bot settings
+.env
+.env.*
+# ...but do keep the template (it has no real keys)
+!.env.example
+
+# --- Bot runtime data ---
+# Daily Kite access token, open positions, instrument cache, shadow trades
+state/
+# Bot logs, trades.csv, backtest CSVs, news briefings, vetoed-trade shadows
+logs/
+*.log
+
+# --- Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Data files produced by backtests or manual exports ---
+*.csv
+*.parquet
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
