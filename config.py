@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+from strategy import StrategyConfig
+
 BASE_DIR = Path(__file__).resolve().parent
 STATE_DIR = BASE_DIR / "state"
 LOG_DIR = BASE_DIR / "logs"
@@ -42,9 +44,7 @@ class Settings:
     protected_symbols: frozenset[str]
     exchange: str
     interval: str
-    fast_period: int
-    slow_period: int
-    ma_type: str
+    strategy: StrategyConfig
     allow_short: bool
     market_filter: bool
     market_index: str
@@ -78,6 +78,26 @@ class Settings:
         return VALID_INTERVALS[self.interval]
 
 
+def load_strategy() -> StrategyConfig:
+    return StrategyConfig(
+        name=os.getenv("STRATEGY", "ma_cross").strip().lower(),
+        fast=int(os.getenv("FAST_PERIOD", "9")),
+        slow=int(os.getenv("SLOW_PERIOD", "21")),
+        ma_type=os.getenv("MA_TYPE", "EMA").upper(),
+        rsi_period=int(os.getenv("RSI_PERIOD", "14")),
+        rsi_oversold=float(os.getenv("RSI_OVERSOLD", "30")),
+        rsi_overbought=float(os.getenv("RSI_OVERBOUGHT", "70")),
+        macd_fast=int(os.getenv("MACD_FAST", "12")),
+        macd_slow=int(os.getenv("MACD_SLOW", "26")),
+        macd_signal=int(os.getenv("MACD_SIGNAL", "9")),
+        bb_period=int(os.getenv("BB_PERIOD", "20")),
+        bb_std=float(os.getenv("BB_STD", "2")),
+        st_period=int(os.getenv("SUPERTREND_PERIOD", "10")),
+        st_multiplier=float(os.getenv("SUPERTREND_MULTIPLIER", "3")),
+        donchian_period=int(os.getenv("DONCHIAN_PERIOD", "20")),
+    )
+
+
 def load_settings() -> Settings:
     s = Settings(
         api_key=os.getenv("KITE_API_KEY", ""),
@@ -86,9 +106,7 @@ def load_settings() -> Settings:
         protected_symbols=frozenset(x.strip().upper() for x in os.getenv("PROTECTED_SYMBOLS", "").split(",") if x.strip()),
         exchange=os.getenv("EXCHANGE", "NSE").upper(),
         interval=os.getenv("INTERVAL", "15minute"),
-        fast_period=int(os.getenv("FAST_PERIOD", "9")),
-        slow_period=int(os.getenv("SLOW_PERIOD", "21")),
-        ma_type=os.getenv("MA_TYPE", "EMA").upper(),
+        strategy=load_strategy(),
         allow_short=_bool("ALLOW_SHORT", "false"),
         market_filter=_bool("MARKET_FILTER", "false"),
         market_index=os.getenv("MARKET_INDEX", "NIFTY 50").strip().upper(),
@@ -120,10 +138,7 @@ def _validate(s: Settings) -> None:
         raise ValueError(f"SYMBOLS contains protected stocks {sorted(blocked)} - remove them from SYMBOLS")
     if s.interval not in VALID_INTERVALS:
         raise ValueError(f"INTERVAL must be one of {list(VALID_INTERVALS)}")
-    if s.fast_period >= s.slow_period:
-        raise ValueError("FAST_PERIOD must be smaller than SLOW_PERIOD")
-    if s.ma_type not in ("SMA", "EMA"):
-        raise ValueError("MA_TYPE must be SMA or EMA")
+    s.strategy.validate()
     if s.product not in ("MIS", "CNC"):
         raise ValueError("PRODUCT must be MIS or CNC")
     if s.allow_short and s.product != "MIS":

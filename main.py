@@ -1,9 +1,9 @@
-"""Live / paper trading loop for the MA crossover strategy.
+"""Live / paper trading loop for the configured strategy (STRATEGY in .env).
 
     python main.py            # uses PAPER_TRADING from .env (default: paper)
 
 Every time a candle closes, it fetches the latest closed candles for each
-symbol, checks for a fresh crossover and moves the position accordingly.
+symbol, checks for a fresh strategy signal and moves the position accordingly.
 MIS positions are squared off at SQUARE_OFF_TIME.
 
 If STOP_LOSS_PCT / TARGET_PCT are set, a WebSocket feed watches live prices and
@@ -95,7 +95,7 @@ class Bot:
         self.kite = get_kite(settings)
         self.instruments = resolve_instruments(self.kite, settings)
         self.broker = Broker(self.kite, settings, self.instruments)
-        self.min_candles = min_candles_needed(settings.slow_period, settings.ma_type)
+        self.min_candles = settings.strategy.min_candles()
         self.last_processed: dict[str, datetime] = {}
         self.squared_off_on = None
         self.intraday = settings.product == "MIS" and settings.interval != "day"
@@ -183,7 +183,7 @@ class Bot:
         first_look = sym not in self.last_processed
         self.last_processed[sym] = last_ts
 
-        row = add_signals(df, self.s.fast_period, self.s.slow_period, self.s.ma_type).iloc[-1]
+        row = add_signals(df, self.s.strategy).iloc[-1]
         if self.shadow:
             self.shadow.on_candle(sym, row, int(row["signal"]), now)  # before any new veto this candle
         with self.lock:
@@ -191,35 +191,35 @@ class Bot:
 
     def _act_on_candle(self, sym, row, last_ts, first_look, now) -> None:
         current = self.broker.position_dir(sym)
-        log.info("%s candle %s close=%.2f fast=%.2f slow=%.2f signal=%+d pos=%+d",
-                 sym, last_ts.strftime("%d-%b %H:%M"), row["close"], row["fast_ma"],
-                 row["slow_ma"], row["signal"], current)
+        log.info("%s candle %s close=%.2f %s signal=%+d pos=%+d",
+                 sym, last_ts.strftime("%d-%b %H:%M"), row["close"], self.s.strategy.describe(row),
+                 row["signal"], current)
 
         if row["signal"] == 0:
             return
-        # On startup, ignore a crossover that happened long ago - we'd be entering late
+        # On startup, ignore a signal that happened long ago - we'd be entering late
         if first_look and self.intraday:
             age = now - (last_ts + timedelta(minutes=self.s.interval_minutes))
             if age > timedelta(minutes=self.s.interval_minutes):
-                log.info("%s: crossover at %s is stale, waiting for the next one", sym, last_ts)
+                log.info("%s: signal at %s is stale, waiting for the next one", sym, last_ts)
                 return
 
         target = target_position(int(row["signal"]), current, self.s.allow_short)
         if self.s.market_filter and not market_allows(target, current, self.market_dir):
             mood = {1: "UP", -1: "DOWN"}.get(self.market_dir, "UNKNOWN")
             log.info("%s: %s but market (%s) is %s - %s", sym,
-                     "golden cross" if row["signal"] > 0 else "death cross",
+                     self.s.strategy.reason(int(row["signal"])),
                      self.s.market_index, mood, "exiting only" if current else "not entering")
             target = 0
         cutoff = self.s.no_new_entries_after
         if target not in (0, current) and cutoff and self.s.interval != "day" and now.time() >= cutoff:
             log.info("%s: %s after %s - no new entries, %s", sym,
-                     "golden cross" if row["signal"] > 0 else "death cross",
+                     self.s.strategy.reason(int(row["signal"])),
                      cutoff.strftime("%H:%M"), "exiting only" if current else "skipping")
             target = 0
         target = self._apply_news_veto(sym, target, current, row, now)
         if target != current:
-            reason = "golden cross" if row["signal"] > 0 else "death cross"
+            reason = self.s.strategy.reason(int(row["signal"]))
             self.broker.set_target(sym, target, reason)
 
     # ---------- news veto ----------
@@ -246,7 +246,7 @@ class Bot:
         reason = self.news_vetoes.get(sym, {}).get(side)
         if not reason:
             return target
-        log.info("%s: %s skipped - news veto (%s)", sym, "golden cross" if target > 0 else "death cross", reason)
+        log.info("%s: %s skipped - news veto (%s)", sym, self.s.strategy.reason(target), reason)
         if self.shadow and self.broker.trades_today < self.s.max_trades_per_day:
             try:
                 price = self.broker.ltp(sym)
@@ -343,15 +343,14 @@ def main() -> None:
 
     banner = "PAPER TRADING (no real orders)" if s.paper_trading else "LIVE TRADING - REAL MONEY"
     log.info("=" * 60)
-    log.info("MA crossover bot | %s", banner)
-    log.info("Symbols=%s Exchange=%s Interval=%s %s %d/%d Product=%s Short=%s",
-             s.symbols, s.exchange, s.interval, s.ma_type, s.fast_period, s.slow_period,
-             s.product, s.allow_short)
+    log.info("Trading bot | %s | %s", s.strategy.label, banner)
+    log.info("Symbols=%s Exchange=%s Interval=%s Strategy=%s Product=%s Short=%s",
+             s.symbols, s.exchange, s.interval, s.strategy.label, s.product, s.allow_short)
     log.info("Money limits: per trade %s, all open positions %s, daily loss %s",
              f"Rs {s.max_capital_per_trade:.0f}" if s.max_capital_per_trade else "no limit",
              f"Rs {s.max_total_capital:.0f}" if s.max_total_capital else "no limit",
              f"Rs {s.max_daily_loss:.0f}" if s.max_daily_loss else "no limit")
-    log.info("Direction: %s", "LONG + SHORT (shorts open on death crosses)" if s.allow_short
+    log.info("Direction: %s", "LONG + SHORT (shorts open on SELL signals)" if s.allow_short
              else "LONG only (set ALLOW_SHORT=true to enable shorts)")
     log.info("Sizing: %s%s%s",
              f"risk Rs {s.risk_per_trade:.0f} per trade" if s.risk_per_trade else f"{s.quantity} shares per trade",

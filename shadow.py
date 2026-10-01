@@ -1,7 +1,7 @@
 """Shadow tracking of trades blocked by the news veto.
 
 When the news veto blocks an entry, we follow the trade that WOULD have happened, using
-the bot's exit rules (stop-loss/target from candle high/low, opposite crossover, square-off),
+the bot's exit rules (stop-loss/target from candle high/low, opposite signal, square-off),
 and log its result to logs/news_vetoes.csv. After a few weeks this shows whether the
 vetoes saved money (shadow P&L negative) or cost good trades (shadow P&L positive).
 
@@ -65,7 +65,7 @@ class ShadowBook:
             elif target is not None and ((d > 0 and hi >= target) or (d < 0 and lo <= target)):
                 self._close(sym, target, when, "target")
             elif signal == -d:
-                self._close(sym, float(candle["close"]), when, "death cross" if d > 0 else "golden cross")
+                self._close(sym, float(candle["close"]), when, self.s.strategy.reason(signal))
 
     def square_off(self, prices: dict[str, float], when: datetime) -> None:
         with self._lock:

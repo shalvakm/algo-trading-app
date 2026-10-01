@@ -64,7 +64,7 @@ COMPANY_NAMES = {
 CONTEXT_INDICES = ["NIFTY 50", "NIFTY BANK", "NIFTY IT", "INDIA VIX"]
 
 SYSTEM_PROMPT = """You are a market analyst preparing a pre-trade briefing for an automated \
-intraday trading bot on India's NSE. The bot trades a moving-average crossover strategy on \
+intraday trading bot on India's NSE. The bot trades {strategy} strategy on \
 short candles. {direction} Your briefing is advisory: \
 a human reads it, and nothing you say places or blocks trades.
 
@@ -322,7 +322,8 @@ def analyse(snapshot: dict, headlines: dict, symbols: list[str]) -> tuple[dict, 
     s = load_settings()
     direction = ("It opens longs when NIFTY 50 is in an uptrend and shorts when NIFTY 50 is in a downtrend."
                  if s.allow_short else "It only opens longs, and only when NIFTY 50 is in an uptrend.")
-    prompt = (f"{SYSTEM_PROMPT.format(direction=direction)}\n\n{_prompt(snapshot, headlines, symbols)}\n\n"
+    system = SYSTEM_PROMPT.format(direction=direction, strategy=s.strategy.description)
+    prompt = (f"{system}\n\n{_prompt(snapshot, headlines, symbols)}\n\n"
               f"Respond with ONLY a JSON object that matches this JSON Schema - no prose, no code fences:\n"
               f"{json.dumps(ANALYSIS_SCHEMA)}")
     last_error = None
