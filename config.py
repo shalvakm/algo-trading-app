@@ -49,6 +49,7 @@ class Settings:
     market_filter: bool
     market_index: str
     market_ma_period: int
+    market_neutral_pct: float
     product: str
     quantity: int
     risk_per_trade: float
@@ -93,6 +94,7 @@ def load_settings() -> Settings:
         market_filter=_bool("MARKET_FILTER", "false"),
         market_index=os.getenv("MARKET_INDEX", "NIFTY 50").strip().upper(),
         market_ma_period=int(os.getenv("MARKET_MA_PERIOD", "50")),
+        market_neutral_pct=float(os.getenv("MARKET_NEUTRAL_PCT", "0")),
         product=os.getenv("PRODUCT", "MIS").upper(),
         quantity=int(os.getenv("QUANTITY", "1")),
         risk_per_trade=float(os.getenv("RISK_PER_TRADE", "0")),
@@ -131,6 +133,8 @@ def _validate(s: Settings) -> None:
     if (s.no_new_entries_after and s.product == "MIS"
             and s.no_new_entries_after >= s.square_off_time):
         raise ValueError("NO_NEW_ENTRIES_AFTER must be earlier than SQUARE_OFF_TIME")
+    if not 0 <= s.market_neutral_pct < 5:
+        raise ValueError("MARKET_NEUTRAL_PCT must be between 0 and 5 (percent)")
     if s.market_filter and s.market_ma_period < 2:
         raise ValueError("MARKET_MA_PERIOD must be >= 2")
     if s.news_mode not in ("off", "advisory", "veto"):

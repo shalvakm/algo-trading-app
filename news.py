@@ -394,13 +394,15 @@ def log_summary(analysis: dict) -> None:
                      f" [{', '.join(st['flags'])}]" if st["flags"] else "", st["note"])
 
 
-VETO_EVENT_FLAGS = {"results_today", "major_news"}
+# Only results day blocks both directions (gaps can jump stop-losses). Other "major_news" was
+# tested in shadow tracking (Sep-Oct 2026) and mostly blocked profitable trades, so it no longer vetoes.
+VETO_EVENT_FLAGS = {"results_today"}
 
 
 def build_vetoes(analysis: dict) -> dict[str, dict[str, str]]:
     """Per-stock blocks for NEW positions from a briefing: {sym: {"long": reason, "short": reason}}.
 
-    Rule 1 (event): results or major news today -> block both directions.
+    Rule 1 (event): results today -> block both directions.
     Rule 2 (direction): bearish outlook -> block longs; bullish outlook -> block shorts.
     """
     vetoes = {}

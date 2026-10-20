@@ -24,6 +24,7 @@ class TickerFeed:
         self.prices: dict[str, float] = {}
         self.last_tick_at: float | None = None
         self._lock = threading.Lock()
+        self._awaiting_first_tick = True
         self._kws = self._build(access_token)
 
     def _build(self, access_token: str) -> KiteTicker:
@@ -42,10 +43,14 @@ class TickerFeed:
         tokens = list(self.token_to_symbol)
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_LTP, tokens)
+        self._awaiting_first_tick = True
         log.info("Ticker connected, streaming %s", sorted(self.token_to_symbol.values()))
 
     def _on_ticks(self, ws, ticks):
         now = _time.time()
+        if self._awaiting_first_tick and ticks:
+            self._awaiting_first_tick = False
+            log.info("Ticker: live prices flowing")
         for t in ticks:
             sym = self.token_to_symbol.get(t["instrument_token"])
             if sym is None:
@@ -72,7 +77,7 @@ class TickerFeed:
         old, self._kws = self._kws, self._build(access_token)
         reactor.callFromThread(old.close)
         reactor.callFromThread(self._kws.connect, threaded=True)
-        log.info("Ticker restarting with new access token")
+        log.info("Ticker: rebuilding the connection")
 
     def stop(self) -> None:
         if reactor.running:

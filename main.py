@@ -120,6 +120,8 @@ class Bot:
             token_to_symbol = {v["instrument_token"]: k for k, v in self.instruments.items()}
             self.feed = TickerFeed(settings.api_key, self.kite.access_token, token_to_symbol, self.on_price)
             self.feed.start()
+            self.last_feed_restart = 0.0
+            threading.Thread(target=self._feed_watchdog, daemon=True, name="feed-watchdog").start()
 
     # ---------- live-tick exits ----------
     def _exit_hit(self, sym: str, price: float) -> str | None:
@@ -152,6 +154,41 @@ class Bot:
                 log.exception("%s: exit order failed", sym)
             finally:
                 self.pending_exits.discard(sym)
+
+    # ---------- price feed watchdog ----------
+    FEED_SILENCE_LIMIT = 60       # seconds without a tick during market hours = feed is stuck
+    FEED_RESTART_COOLDOWN = 300   # don't rebuild the connection more often than this
+
+    def _feed_watchdog(self) -> None:
+        while True:
+            _time.sleep(20)
+            try:
+                self.check_feed()
+            except Exception:
+                log.exception("Feed watchdog error")
+
+    def check_feed(self, now: datetime | None = None) -> bool:
+        """Rebuilds the WebSocket if no ticks arrive during market hours. Returns True if it restarted.
+
+        Kite's library only reconnects when the connection drops; a connection that stays open but
+        stops delivering prices (seen after a reconnect) needs a fresh connection.
+        """
+        now = now or datetime.now(IST)
+        if not self.feed or now.weekday() >= 5:
+            return False
+        warmup = (datetime.combine(now.date(), MARKET_OPEN) + timedelta(minutes=5)).time()
+        if not (warmup <= now.time() < MARKET_CLOSE):
+            return False
+        age = self.feed.seconds_since_last_tick()
+        if age is not None and age <= self.FEED_SILENCE_LIMIT:
+            return False
+        if _time.time() - self.last_feed_restart < self.FEED_RESTART_COOLDOWN:
+            return False
+        log.warning("No live ticks for %s - rebuilding the price feed connection",
+                    "the whole session so far" if age is None else f"{age:.0f}s")
+        self.last_feed_restart = _time.time()
+        self.feed.restart(self.kite.access_token)
+        return True
 
     def check_exits_fallback(self) -> None:
         """Backup for the WebSocket: check open positions against a REST price every candle."""
@@ -206,7 +243,7 @@ class Bot:
 
         target = target_position(int(row["signal"]), current, self.s.allow_short)
         if self.s.market_filter and not market_allows(target, current, self.market_dir):
-            mood = {1: "UP", -1: "DOWN"}.get(self.market_dir, "UNKNOWN")
+            mood = {1: "UP", -1: "DOWN", 0: "NEUTRAL"}.get(self.market_dir, "UNKNOWN")
             log.info("%s: %s but market (%s) is %s - %s", sym,
                      "golden cross" if row["signal"] > 0 else "death cross",
                      self.s.market_index, mood, "exiting only" if current else "not entering")
@@ -262,15 +299,16 @@ class Bot:
         period = self.s.market_ma_period
         try:
             df = recent_closed_candles(self.kite, self.market_token, self.s, min_candles_needed(period, "EMA"))
-            trend = market_trend(df, period)
+            trend = market_trend(df, period, self.s.market_neutral_pct)
             last = trend.iloc[-1] if len(trend) else float("nan")
             self.market_dir = None if last != last else int(last)  # NaN -> None
             ema = df["close"].ewm(span=period, adjust=False).mean().iloc[-1] if len(df) else float("nan")
             log.info("Market %s candle %s close=%.2f EMA%d=%.2f -> %s", self.s.market_index,
                      df.index[-1].strftime("%d-%b %H:%M") if len(df) else "-",
                      df["close"].iloc[-1] if len(df) else float("nan"), period, ema,
-                     {1: "UP (longs allowed)", -1: "DOWN (no new longs)"}.get(self.market_dir,
-                                                                             "UNKNOWN (no new entries)"))
+                     {1: "UP (longs allowed)", -1: "DOWN (no new longs)",
+                      0: f"NEUTRAL - within +/-{self.s.market_neutral_pct}% of EMA (no new entries)"}
+                     .get(self.market_dir, "UNKNOWN (no new entries)"))
         except (TokenException, KeyboardInterrupt):
             raise
         except Exception as e:
@@ -360,6 +398,7 @@ def main() -> None:
     if s.no_new_entries_after:
         log.info("No new entries after %s", s.no_new_entries_after.strftime("%H:%M"))
     log.info("Market filter: %s", f"on - follow {s.market_index} vs its EMA{s.market_ma_period}"
+             + (f", neutral zone +/-{s.market_neutral_pct}% (no new entries)" if s.market_neutral_pct else "")
              if s.market_filter else "off")
     log.info("News briefing: %s", {"off": "off", "advisory": "on (once per day at startup, advisory only)",
                                     "veto": "on, VETO mode (briefing can block new trades; shadow-tracked)"}[s.news_mode])

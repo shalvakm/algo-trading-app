@@ -136,7 +136,8 @@ class Broker:
         risk = fitted * ltp * self.s.stop_loss_pct / 100 if self.s.stop_loss_pct else None
         log.info("%s: sizing %d shares @ ~%.2f = %.0f value%s", sym, fitted, ltp, fitted * ltp,
                  f", risk to stop ~{risk:.0f}" if risk else "")
-        self._execute(sym, target_dir * fitted, reason, opening=True, ltp=ltp)
+        self._execute(sym, target_dir * fitted, reason, opening=True, ltp=ltp,
+                      margin_per_share=required / qty)
 
     # ---------- money limits ----------
     def open_exposure(self) -> float:
@@ -184,14 +185,26 @@ class Broker:
 
     # ---------- funds ----------
     def available_funds(self) -> float:
-        if self.mode == "paper":
-            return self.s.paper_funds - self.open_exposure()
-        return float(self.kite.margins("equity")["net"])
+        """Live: Kite's available equity balance. Paper: a simulated Zerodha balance -
+        PAPER_FUNDS + today's realized P&L - margin blocked by open positions - open losses."""
+        if self.mode == "live":
+            return float(self.kite.margins("equity")["net"])
+        open_loss = 0.0
+        for sym, p in self.positions.items():
+            if p["qty"]:
+                try:
+                    open_loss += min((self.ltp(sym) - p["avg_price"]) * p["qty"], 0.0)
+                except Exception:
+                    pass
+        return self.s.paper_funds + self.realized_today - self.blocked_margin() + open_loss
+
+    def blocked_margin(self) -> float:
+        """Margin held by open positions (full value for positions saved before margin was tracked)."""
+        return sum(p.get("margin", abs(p["qty"]) * p["avg_price"])
+                   for p in self.positions.values() if p["qty"])
 
     def _required_margin(self, sym: str, side: str, qty: int, price: float) -> float:
-        """Margin Zerodha will block for this order (live), or its full value (paper)."""
-        if self.mode == "paper":
-            return qty * price
+        """Margin Zerodha will block for this order (asked from Kite in paper and live mode)."""
         try:
             r = self.kite.order_margins([{
                 "exchange": self.s.exchange, "tradingsymbol": sym,
@@ -205,7 +218,7 @@ class Broker:
             return qty * price
 
     def _execute(self, sym: str, signed_qty: int, reason: str, opening: bool,
-                 ltp: float | None = None) -> None:
+                 ltp: float | None = None, margin_per_share: float = 0.0) -> None:
         side = "BUY" if signed_qty > 0 else "SELL"
         qty = abs(signed_qty)
         ltp = ltp if ltp is not None else self.ltp(sym)
@@ -219,7 +232,15 @@ class Broker:
                 return
 
         signed = filled_qty if side == "BUY" else -filled_qty
+        old_qty = self.positions.get(sym, {}).get("qty", 0)
         pnl = self._apply_fill(sym, signed, fill_price)
+        pos = self.positions[sym]
+        if opening:
+            pos["margin"] = pos.get("margin", 0.0) * (old_qty != 0) + margin_per_share * filled_qty
+        elif pos["qty"] == 0:
+            pos["margin"] = 0.0
+        elif old_qty:
+            pos["margin"] = pos.get("margin", abs(old_qty) * pos["avg_price"]) * abs(pos["qty"]) / abs(old_qty)
         self.realized_today += pnl
         if opening:
             self.trades_today += 1
@@ -297,13 +318,32 @@ class Broker:
         pos["qty"] = new_qty
         return pnl
 
+    @staticmethod
+    def _last_logged_date() -> str | None:
+        """Date (YYYY-MM-DD) of the last trade row in trades.csv, if any."""
+        try:
+            with TRADES_CSV.open("rb") as f:
+                f.seek(0, 2)
+                f.seek(max(f.tell() - 4096, 0))
+                lines = [ln for ln in f.read().decode(errors="ignore").splitlines() if ln.strip()]
+        except FileNotFoundError:
+            return None
+        last = lines[-1] if lines else ""
+        return last[:10] if last[:4].isdigit() else None
+
     def _log_trade(self, sym, side, qty, price, reason, pnl) -> None:
         new_file = not TRADES_CSV.exists()
+        now = datetime.now(IST)
+        # a blank line before each day's first trade keeps days visually separate
+        # (csv.DictReader, pandas and spreadsheets all skip/ignore empty lines)
+        new_day = not new_file and self._last_logged_date() not in (None, now.date().isoformat())
         with TRADES_CSV.open("a", newline="") as f:
             w = csv.writer(f)
             if new_file:
                 w.writerow(["time", "mode", "symbol", "side", "qty", "price", "reason", "realized_pnl"])
-            w.writerow([datetime.now(IST).isoformat(timespec="seconds"), self.mode, sym,
+            elif new_day:
+                f.write("\r\n")
+            w.writerow([now.isoformat(timespec="seconds"), self.mode, sym,
                         side, qty, f"{price:.2f}", reason, f"{pnl:.2f}"])
         if pnl:
             log.info("%s realized P&L: %.2f", sym, pnl)
