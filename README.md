@@ -50,6 +50,10 @@ Set in `.env` (0 = off). They apply to new positions only; exits always run.
 | `MAX_DAILY_LOSS` | stops new trades for the day once today's closed plus open losses reach it |
 The backtester applies `MAX_CAPITAL_PER_TRADE`; the total and daily-loss limits apply to the live and paper bot.
 
+`PAPER_FUNDS` is a simulated Zerodha balance: in paper mode each trade blocks the real margin Kite reports for that order
+(about 20% intraday), released on close, with today's profit/loss and open losses applied, the same as a live account.
+Set it to the amount you plan to deposit.
+
 ## Market filter (follow the overall market)
 With `MARKET_FILTER=true`, at every candle check the bot first fetches `MARKET_INDEX` (NIFTY 50)
 and compares its close with its EMA(`MARKET_MA_PERIOD`) on the same candle interval:
@@ -57,6 +61,9 @@ and compares its close with its EMA(`MARKET_MA_PERIOD`) on the same candle inter
 - index below its EMA = market DOWN: golden crosses are logged and skipped
 - index data unavailable = UNKNOWN: no new entries that candle (fail-safe)
 Exits are never blocked. The backtest applies the same rule: `--market-filter/--no-market-filter`, `--market-ma 50`.
+
+With `MARKET_NEUTRAL_PCT` (e.g. 0.5), an index within +/- that % of its EMA counts as NEUTRAL: no new trades in
+either direction, since there's no clear trend. Backtest with `--market-neutral 0.5`.
 
 ## Stop-loss / target (live ticks)
 Set `STOP_LOSS_PCT` / `TARGET_PCT` in `.env` (0 = off). While a position is open, the bot
@@ -79,7 +86,7 @@ briefing. Run it by hand with `python news.py` (`--refresh` regenerates it).
 
 **`NEWS_MODE=veto`**: the briefing can also **block new trades** for the day, but it never opens trades
 and never blocks exits:
-- results or major news today in a stock: no new trades in it (gaps can jump past stop-losses)
+- results today in a stock: no new trades in it (gaps can jump past stop-losses)
 - bearish outlook: no longs in that stock; bullish outlook: no shorts in it
 Vetoes apply once the briefing is ready (about 90s after startup) and only for that day. If the briefing
 fails, the bot trades normally. Each blocked trade is **shadow-tracked** with the bot's exit rules and logged

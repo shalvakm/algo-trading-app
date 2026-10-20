@@ -72,13 +72,20 @@ def exit_reason(price: float, direction: int, stop: float | None, target: float 
     return None
 
 
-def market_trend(index_df: pd.DataFrame, period: int) -> pd.Series:
+def market_trend(index_df: pd.DataFrame, period: int, neutral_pct: float = 0.0) -> pd.Series:
     """+1 when the index closes above its EMA(period) (market up), -1 below (market down).
 
-    NaN until there's enough history, which blocks entries rather than guessing.
+    With neutral_pct > 0, closes within +/-neutral_pct% of the EMA are 0 (no clear trend), which
+    blocks new entries in both directions. NaN until there's enough history (also blocks entries).
     """
     ema = moving_average(index_df["close"], period, "EMA")
-    trend = (index_df["close"] > ema).map({True: 1.0, False: -1.0})
+    band = neutral_pct / 100
+    close = index_df["close"]
+    trend = pd.Series(0.0, index=index_df.index)
+    trend[close > ema * (1 + band)] = 1.0
+    trend[close < ema * (1 - band)] = -1.0
+    if band == 0:
+        trend[close == ema] = -1.0  # same as before: only strictly above counts as up
     trend[ema.isna()] = float("nan")
     return trend
 

@@ -168,6 +168,8 @@ def main():
     p.add_argument("--market-filter", action=argparse.BooleanOptionalAction, default=s.market_filter,
                    help=f"only enter in the direction of {s.market_index} vs its EMA")
     p.add_argument("--market-ma", type=int, default=s.market_ma_period)
+    p.add_argument("--market-neutral", type=float, default=s.market_neutral_pct,
+                   help="no new entries while the index is within +/- this %% of its EMA (0 = off)")
     p.add_argument("--csv", help="backtest a local OHLC CSV instead of fetching from Kite")
     a = p.parse_args()
 
@@ -195,7 +197,7 @@ def main():
             from data import resolve_index_token
             idx = fetch_history(kite, resolve_index_token(kite, s.exchange, s.market_index),
                                 a.interval, end - timedelta(days=a.days), end)
-            market_dir = market_trend(idx, a.market_ma)
+            market_dir = market_trend(idx, a.market_ma, a.market_neutral)
 
     intraday = a.product == "MIS" and a.interval != "day"
     sizing = replace(s, stop_loss_pct=a.stop_loss_pct, risk_per_trade=a.risk_per_trade)
