@@ -39,6 +39,9 @@ class Settings:
     api_key: str
     api_secret: str
     symbols: list[str]
+    symbol_mode: str
+    scan_top: int
+    scan_min_price: float
     protected_symbols: frozenset[str]
     exchange: str
     interval: str
@@ -84,6 +87,9 @@ def load_settings() -> Settings:
         api_key=os.getenv("KITE_API_KEY", ""),
         api_secret=os.getenv("KITE_API_SECRET", ""),
         symbols=[x.strip().upper() for x in os.getenv("SYMBOLS", "RELIANCE").split(",") if x.strip()],
+        symbol_mode=os.getenv("SYMBOL_MODE", "fixed").strip().lower(),
+        scan_top=int(os.getenv("SCAN_TOP", "20")),
+        scan_min_price=float(os.getenv("SCAN_MIN_PRICE", "50")),
         protected_symbols=frozenset(x.strip().upper() for x in os.getenv("PROTECTED_SYMBOLS", "").split(",") if x.strip()),
         exchange=os.getenv("EXCHANGE", "NSE").upper(),
         interval=os.getenv("INTERVAL", "15minute"),
@@ -117,6 +123,10 @@ def load_settings() -> Settings:
 
 
 def _validate(s: Settings) -> None:
+    if s.symbol_mode not in ("fixed", "scan"):
+        raise ValueError("SYMBOL_MODE must be fixed or scan")
+    if s.symbol_mode == "scan" and not 1 <= s.scan_top <= 50:
+        raise ValueError("SCAN_TOP must be between 1 and 50")
     blocked = s.protected_symbols.intersection(s.symbols)
     if blocked:
         raise ValueError(f"SYMBOLS contains protected stocks {sorted(blocked)} - remove them from SYMBOLS")

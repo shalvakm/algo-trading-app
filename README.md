@@ -32,6 +32,7 @@ python main.py                                   # run the bot (paper mode by de
 | `ticker.py` | WebSocket live prices for instant stop-loss / target exits |
 | `check_credentials.py` | Read-only check that your Kite login works |
 | `news.py` | Morning news briefing analysed by Claude (advisory) |
+| `scan.py` | Most active stocks today (read-only): top by turnover and by unusual activity |
 
 ## Position sizing
 With `RISK_PER_TRADE` set, each trade buys enough shares that hitting the stop-loss loses about
@@ -94,6 +95,20 @@ to `logs/news_vetoes.csv`; run `python shadow.py` to see whether the vetoes save
 
 One-time setup: install the Claude Code CLI, then run `claude` once in a terminal and log in with your
 Claude account. If `claude` isn't on your PATH, set `CLAUDE_CLI_PATH` in `.env`.
+
+## Daily stock selection (SYMBOL_MODE=scan)
+With `SYMBOL_MODE=scan`, at startup the bot picks the day's `SCAN_TOP` (20) stocks from the ~200 F&O stocks:
+those with the highest **turnover in the last session relative to their own 20-day average**, at or above
+`SCAN_MIN_PRICE`, never `PROTECTED_SYMBOLS`. The picks are logged and saved to `logs/watchlist_YYYY-MM-DD.csv`,
+and a restart the same day reuses them. Open positions are always kept in the list. If the scan fails, the bot
+uses `SYMBOLS` from `.env`. `SYMBOL_MODE=fixed` trades `SYMBOLS` as before.
+
+## Most active stocks scanner
+`python scan.py` lists the ~200 F&O stocks ranked two ways: **turnover** (rupees traded) and **unusual
+activity** (turnover against each stock's own 20-day average, scaled to the time of day). During market hours
+it uses live quotes for today so far; otherwise it shows the last session. Options: `--top 30`, `--csv`.
+It's read-only and for information only: the bot doesn't trade from it. The first run each day takes about a
+minute to build the 20-day baseline; later runs take seconds.
 
 ## Going live
 1. Paper trade for a few weeks and review `logs/trades.csv` and `logs/bot_*.log`.

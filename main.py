@@ -9,18 +9,20 @@ MIS positions are squared off at SQUARE_OFF_TIME.
 If STOP_LOSS_PCT / TARGET_PCT are set, a WebSocket feed watches live prices and
 exits a position the moment either level is hit, without waiting for the candle.
 """
+import json
 import logging
 import queue
 import sys
 import threading
 import time as _time
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from kiteconnect.exceptions import NetworkException, TokenException
 
 from auth import get_kite, interactive_login
 from broker import Broker
-from config import IST, LOG_DIR, MARKET_CLOSE, MARKET_OPEN, Settings, load_settings
+from config import IST, LOG_DIR, MARKET_CLOSE, MARKET_OPEN, STATE_DIR, Settings, load_settings
 from data import NETWORK_ERRORS, recent_closed_candles, resolve_index_token, resolve_instruments
 from strategy import (add_signals, exit_levels, exit_reason, market_allows, market_trend,
                       min_candles_needed, target_position)
@@ -375,15 +377,47 @@ class Bot:
                 _time.sleep(30)
 
 
+def todays_symbols(s: Settings) -> Settings:
+    """SYMBOL_MODE=scan: replace SYMBOLS with today's scan picks (plus any open positions).
+    Falls back to SYMBOLS from .env if the scan fails."""
+    if s.symbol_mode != "scan":
+        return s
+    try:
+        from scan import select_watchlist
+        picks, table = select_watchlist(get_kite(s), s)
+        if not picks:
+            raise RuntimeError("scan returned no stocks")
+    except Exception as e:
+        log.warning("Stock scan failed (%s: %s) - using SYMBOLS from .env", type(e).__name__, e)
+        return s
+    # keep managing anything already open (e.g. after a same-day restart), even if not picked today
+    held = []
+    for mode in ("paper", "live"):
+        f = STATE_DIR / f"positions_{mode}.json"
+        if f.exists():
+            data = json.loads(f.read_text())
+            if data.get("date") == datetime.now(IST).date().isoformat():
+                held += [k for k, v in data.get("positions", {}).items() if v.get("qty")]
+    symbols = list(dict.fromkeys(picks + [h for h in held if h not in s.protected_symbols]))
+    log.info("Stock scan: today's top %d by unusual activity (last session turnover vs 20-day average):",
+             len(picks))
+    for r in table.itertuples():
+        log.info("  %2d. %-12s %5.2fx normal | Rs %6.0f cr | %+.2f%% on %s",
+                 r.rank, r.stock, r.vs_normal, r.turnover_cr, r.chg_pct, r.session)
+    if len(symbols) > len(picks):
+        log.info("  + still managing open position(s): %s", ", ".join(symbols[len(picks):]))
+    return replace(s, symbols=symbols)
+
+
 def main() -> None:
     setup_logging()
-    s = load_settings()
+    s = todays_symbols(load_settings())
 
     banner = "PAPER TRADING (no real orders)" if s.paper_trading else "LIVE TRADING - REAL MONEY"
     log.info("=" * 60)
     log.info("MA crossover bot | %s", banner)
-    log.info("Symbols=%s Exchange=%s Interval=%s %s %d/%d Product=%s Short=%s",
-             s.symbols, s.exchange, s.interval, s.ma_type, s.fast_period, s.slow_period,
+    log.info("Symbols (%s)=%s Exchange=%s Interval=%s %s %d/%d Product=%s Short=%s",
+             "today's scan" if s.symbol_mode == "scan" else "fixed", s.symbols, s.exchange, s.interval, s.ma_type, s.fast_period, s.slow_period,
              s.product, s.allow_short)
     log.info("Money limits: per trade %s, all open positions %s, daily loss %s",
              f"Rs {s.max_capital_per_trade:.0f}" if s.max_capital_per_trade else "no limit",

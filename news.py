@@ -423,7 +423,19 @@ def build_vetoes(analysis: dict) -> dict[str, dict[str, str]]:
 
 
 def names_for(s: Settings) -> dict[str, str]:
-    names = dict(COMPANY_NAMES)
+    names = {}
+    # default: Kite's company name (e.g. PNB -> "Punjab National Bank"), so scanned stocks get sensible searches
+    try:
+        import pandas as pd
+        from config import STATE_DIR
+        files = sorted(STATE_DIR.glob(f"instruments_{s.exchange}_*.csv"))
+        if files:
+            ins = pd.read_csv(files[-1], usecols=["tradingsymbol", "name"]).dropna()
+            wanted = ins[ins["tradingsymbol"].isin(s.symbols)]
+            names.update({r.tradingsymbol: str(r.name).title() for r in wanted.itertuples()})
+    except Exception:
+        pass
+    names.update(COMPANY_NAMES)
     for pair in os.getenv("NEWS_NAMES", "").split(","):
         if ":" in pair:
             sym, name = pair.split(":", 1)
