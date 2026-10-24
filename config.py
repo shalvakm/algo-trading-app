@@ -63,6 +63,8 @@ class Settings:
     limit_buffer_pct: float
     square_off_time: time
     no_new_entries_after: time | None
+    join_young_trends: bool
+    join_max_age: int
     stop_loss_pct: float
     target_pct: float
     paper_trading: bool
@@ -110,6 +112,8 @@ def load_settings() -> Settings:
         paper_funds=float(os.getenv("PAPER_FUNDS", "100000")),
         limit_buffer_pct=float(os.getenv("LIMIT_BUFFER_PCT", "0.1")),
         square_off_time=_time("SQUARE_OFF_TIME", "15:15"),
+        join_young_trends=_bool("JOIN_YOUNG_TRENDS", "false"),
+        join_max_age=int(os.getenv("JOIN_MAX_AGE", "7")),
         no_new_entries_after=_time("NO_NEW_ENTRIES_AFTER", "") if os.getenv("NO_NEW_ENTRIES_AFTER", "").strip() else None,
         stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "0")),
         target_pct=float(os.getenv("TARGET_PCT", "0")),
@@ -149,6 +153,8 @@ def _validate(s: Settings) -> None:
         raise ValueError("MARKET_MA_PERIOD must be >= 2")
     if s.news_mode not in ("off", "advisory", "veto"):
         raise ValueError("NEWS_MODE must be off, advisory or veto")
+    if s.join_young_trends and not 1 <= s.join_max_age <= 50:
+        raise ValueError("JOIN_MAX_AGE must be between 1 and 50 candles")
     if s.stop_loss_pct < 0 or s.target_pct < 0:
         raise ValueError("STOP_LOSS_PCT and TARGET_PCT must be >= 0 (0 = disabled)")
     if min(s.risk_per_trade, s.max_capital_per_trade, s.max_total_capital, s.max_daily_loss) < 0:

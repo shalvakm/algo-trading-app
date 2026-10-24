@@ -96,6 +96,13 @@ to `logs/news_vetoes.csv`; run `python shadow.py` to see whether the vetoes save
 One-time setup: install the Claude Code CLI, then run `claude` once in a terminal and log in with your
 Claude account. If `claude` isn't on your PATH, set `CLAUDE_CLI_PATH` in `.env`.
 
+## Joining young trends (JOIN_YOUNG_TRENDS)
+Besides fresh crossovers, the bot can also enter a stock whose trend started within the last `JOIN_MAX_AGE`
+candles (7 x 60-min = about one trading day) and points the same way as the market. At most one join per stock
+per day; exits and limits are the same as for other trades. Old trends (e.g. a stock that has fallen for a week)
+are not joined. Backtest with `--join-young` / `--no-join-young`. The backtester now loads 30 days of warm-up
+history so the moving averages are settled when trading starts, like the live bot.
+
 ## Daily stock selection (SYMBOL_MODE=scan)
 With `SYMBOL_MODE=scan`, at startup the bot picks the day's `SCAN_TOP` (20) stocks from the ~200 F&O stocks:
 those with the highest **turnover in the last session relative to their own 20-day average**, at or above

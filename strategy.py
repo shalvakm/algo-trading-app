@@ -93,3 +93,24 @@ def market_trend(index_df: pd.DataFrame, period: int, neutral_pct: float = 0.0) 
 def market_allows(target: int, current: int, market_dir) -> bool:
     """Exits and holds are always allowed; a new position must agree with the market."""
     return target in (0, current) or market_dir == target
+
+
+def trend_age(sig_df: pd.DataFrame) -> pd.Series:
+    """Candles since the last crossover (0 on the crossover candle itself)."""
+    return sig_df.groupby((sig_df["signal"] != 0).cumsum()).cumcount()
+
+
+def young_trend_joins(sig_df: pd.DataFrame, market: pd.Series | None, max_age: int) -> pd.Series:
+    """Direction to JOIN an ongoing trend at each candle (+1/-1, 0 = none).
+
+    A join is allowed on a candle with no fresh crossover when the stock's trend (fast vs slow) started
+    1..max_age candles ago and points the same way as the market (if a market series is given).
+    At most one join per stock per day (the first qualifying candle).
+    """
+    trend = (sig_df["fast_ma"] > sig_df["slow_ma"]).map({True: 1, False: -1}).where(sig_df["slow_ma"].notna(), 0)
+    age = trend_age(sig_df)
+    cand = (sig_df["signal"] == 0) & (age >= 1) & (age <= max_age) & (trend != 0)
+    if market is not None:
+        cand &= trend == market.reindex(sig_df.index)
+    first = cand & (cand.groupby(sig_df.index.date).cumsum() == 1)
+    return trend.where(first, 0).astype(int)

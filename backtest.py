@@ -25,17 +25,21 @@ import pandas as pd
 
 from config import IST, LOG_DIR, load_settings
 from sizing import position_size
-from strategy import add_signals, exit_levels, market_allows, market_trend, target_position
+from strategy import add_signals, exit_levels, market_allows, market_trend, target_position, young_trend_joins
 
 
 def run_backtest(df: pd.DataFrame, fast: int, slow: int, ma_type: str, allow_short: bool,
                  intraday: bool, square_off_time, cost_pct: float,
                  stop_loss_pct: float = 0.0, target_pct: float = 0.0,
                  size_fn=None, capital: float = 0.0,
-                 no_entries_after=None, market_dir: pd.Series | None = None) -> tuple[pd.DataFrame, dict]:
+                 no_entries_after=None, market_dir: pd.Series | None = None,
+                 join_max_age: int = 0, entries_from=None) -> tuple[pd.DataFrame, dict]:
     df = add_signals(df, fast, slow, ma_type)
     # market direction (+1/-1) at each candle's close; missing -> NaN -> blocks entries
     market = market_dir.reindex(df.index) if market_dir is not None else None
+    if join_max_age:  # JOIN_YOUNG_TRENDS: treat a young, market-aligned trend as an entry signal
+        joins = young_trend_joins(df, market, join_max_age)
+        df["signal"] = df["signal"].where(df["signal"] != 0, joins)
     blocked = 0
     cost = cost_pct / 100
     trades = []
@@ -68,6 +72,8 @@ def run_backtest(df: pd.DataFrame, fast: int, slow: int, ma_type: str, allow_sho
         after_cutoff = intraday and ts.time() >= square_off_time
 
         # 1. execute pending order at this candle's open
+        if pending and pending != position and entries_from is not None and ts < entries_from:
+            pending = 0  # still inside the warm-up history: no new positions yet
         if pending and pending != position and no_entries_after and ts.time() >= no_entries_after:
             pending = 0  # too late in the day to open a new position; still allowed to close
         if pending is not None and pending != position and not after_cutoff:
@@ -119,14 +125,17 @@ def run_backtest(df: pd.DataFrame, fast: int, slow: int, ma_type: str, allow_sho
 
     trades_df = pd.DataFrame(trades)
     wins = (trades_df["return_pct"] > 0).sum() if len(trades_df) else 0
+    shown = df[df.index >= entries_from] if entries_from is not None else df  # excludes warm-up history
+    if shown.empty:
+        shown = df
     stats = {
-        "candles": len(df),
-        "period": f"{df.index[0]} -> {df.index[-1]}",
+        "candles": len(shown),
+        "period": f"{shown.index[0]} -> {shown.index[-1]}",
         "trades": len(trades_df),
         "win_rate_pct": round(100 * wins / len(trades_df), 1) if len(trades_df) else 0.0,
         "avg_trade_pct": round(trades_df["return_pct"].mean(), 3) if len(trades_df) else 0.0,
         "strategy_return_pct": round((equity - 1) * 100, 2),
-        "buy_and_hold_pct": round((df["close"].iloc[-1] / df["open"].iloc[0] - 1) * 100, 2),
+        "buy_and_hold_pct": round((shown["close"].iloc[-1] / shown["open"].iloc[0] - 1) * 100, 2),
         "max_drawdown_pct": round(max_dd * 100, 2),
         "avg_shares_per_trade": round(trades_df["qty"].mean(), 1) if len(trades_df) else 0,
         "gross_pnl_rs": round(gross_pnl, 2),
@@ -170,9 +179,13 @@ def main():
     p.add_argument("--market-ma", type=int, default=s.market_ma_period)
     p.add_argument("--market-neutral", type=float, default=s.market_neutral_pct,
                    help="no new entries while the index is within +/- this %% of its EMA (0 = off)")
+    p.add_argument("--join-young", action=argparse.BooleanOptionalAction, default=s.join_young_trends,
+                   help="also join young trends that agree with the market")
+    p.add_argument("--join-age", type=int, default=s.join_max_age, help="max candles since the crossover")
     p.add_argument("--csv", help="backtest a local OHLC CSV instead of fetching from Kite")
     a = p.parse_args()
 
+    entries_from = None
     if a.csv:
         df = load_csv(a.csv)
         label = a.csv
@@ -183,7 +196,10 @@ def main():
         inst = resolve_instruments(kite, replace(s, symbols=[a.symbol.upper()]))
         token = inst[a.symbol.upper()]["instrument_token"]
         end = datetime.now(IST)
-        df = fetch_history(kite, token, a.interval, end - timedelta(days=a.days), end)
+        # extra history first so the moving averages are settled when trading starts (like the live bot)
+        warmup = timedelta(days=250 if a.interval == "day" else 30)
+        df = fetch_history(kite, token, a.interval, end - timedelta(days=a.days) - warmup, end)
+        entries_from = (end - timedelta(days=a.days)).astimezone(IST)
         label = f"{a.symbol.upper()} {a.interval}"
 
     if df.empty:
@@ -196,7 +212,7 @@ def main():
         else:
             from data import resolve_index_token
             idx = fetch_history(kite, resolve_index_token(kite, s.exchange, s.market_index),
-                                a.interval, end - timedelta(days=a.days), end)
+                                a.interval, end - timedelta(days=a.days) - timedelta(days=250 if a.interval == "day" else 30), end)
             market_dir = market_trend(idx, a.market_ma, a.market_neutral)
 
     intraday = a.product == "MIS" and a.interval != "day"
@@ -210,7 +226,8 @@ def main():
                                  size_fn=lambda price: position_size(price, sizing),
                                  capital=a.capital,
                                  no_entries_after=s.no_new_entries_after if a.interval != "day" else None,
-                                 market_dir=market_dir)
+                                 market_dir=market_dir, join_max_age=a.join_age if a.join_young else 0,
+                                 entries_from=entries_from)
 
     print(f"\n=== Backtest: {label} | {a.ma_type} {a.fast}/{a.slow} | "
           f"{'intraday' if intraday else 'positional'}"

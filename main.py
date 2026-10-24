@@ -25,7 +25,7 @@ from broker import Broker
 from config import IST, LOG_DIR, MARKET_CLOSE, MARKET_OPEN, STATE_DIR, Settings, load_settings
 from data import NETWORK_ERRORS, recent_closed_candles, resolve_index_token, resolve_instruments
 from strategy import (add_signals, exit_levels, exit_reason, market_allows, market_trend,
-                      min_candles_needed, target_position)
+                      min_candles_needed, target_position, trend_age)
 from shadow import ShadowBook
 from sizing import position_size
 from ticker import TickerFeed
@@ -110,6 +110,7 @@ class Bot:
         # News veto (NEWS_MODE=veto): per-stock entry blocks for the day, set once the briefing is ready
         self.news_vetoes: dict[str, dict[str, str]] | None = None
         self.news_vetoes_date = None
+        self.joined_on: dict[str, object] = {}  # JOIN_YOUNG_TRENDS: at most one join per stock per day
         self.shadow = ShadowBook(settings) if settings.news_mode == "veto" else None
 
         # Serialises every position change: candle loop, tick exits and square-off
@@ -222,7 +223,14 @@ class Bot:
         first_look = sym not in self.last_processed
         self.last_processed[sym] = last_ts
 
-        row = add_signals(df, self.s.fast_period, self.s.slow_period, self.s.ma_type).iloc[-1]
+        sig = add_signals(df, self.s.fast_period, self.s.slow_period, self.s.ma_type)
+        row = sig.iloc[-1].copy()
+        row["join"], row["age"] = 0, int(trend_age(sig).iloc[-1])
+        if self.s.join_young_trends and row["signal"] == 0 and row["slow_ma"] == row["slow_ma"]:
+            trend = 1 if row["fast_ma"] > row["slow_ma"] else -1
+            aligned = (not self.s.market_filter) or self.market_dir == trend
+            if 1 <= row["age"] <= self.s.join_max_age and aligned:
+                row["join"] = trend  # once per stock per day is enforced in _act_on_candle
         if self.shadow:
             self.shadow.on_candle(sym, row, int(row["signal"]), now)  # before any new veto this candle
         with self.lock:
@@ -234,32 +242,37 @@ class Bot:
                  sym, last_ts.strftime("%d-%b %H:%M"), row["close"], row["fast_ma"],
                  row["slow_ma"], row["signal"], current)
 
-        if row["signal"] == 0:
-            return
+        signal = int(row["signal"])
+        what = "golden cross" if signal > 0 else "death cross"
+        if signal == 0:
+            join = int(row.get("join", 0) or 0)
+            if not join or current != 0 or self.joined_on.get(sym) == now.date():
+                return
+            self.joined_on[sym] = now.date()
+            signal = join
+            what = f"young {'up' if join > 0 else 'down'}trend ({int(row['age'])} candles after the cross)"
+            log.info("%s: joining %s", sym, what)
         # On startup, ignore a crossover that happened long ago - we'd be entering late
-        if first_look and self.intraday:
+        elif first_look and self.intraday:
             age = now - (last_ts + timedelta(minutes=self.s.interval_minutes))
             if age > timedelta(minutes=self.s.interval_minutes):
                 log.info("%s: crossover at %s is stale, waiting for the next one", sym, last_ts)
                 return
 
-        target = target_position(int(row["signal"]), current, self.s.allow_short)
+        target = target_position(signal, current, self.s.allow_short)
         if self.s.market_filter and not market_allows(target, current, self.market_dir):
             mood = {1: "UP", -1: "DOWN", 0: "NEUTRAL"}.get(self.market_dir, "UNKNOWN")
-            log.info("%s: %s but market (%s) is %s - %s", sym,
-                     "golden cross" if row["signal"] > 0 else "death cross",
+            log.info("%s: %s but market (%s) is %s - %s", sym, what,
                      self.s.market_index, mood, "exiting only" if current else "not entering")
             target = 0
         cutoff = self.s.no_new_entries_after
         if target not in (0, current) and cutoff and self.s.interval != "day" and now.time() >= cutoff:
-            log.info("%s: %s after %s - no new entries, %s", sym,
-                     "golden cross" if row["signal"] > 0 else "death cross",
+            log.info("%s: %s after %s - no new entries, %s", sym, what,
                      cutoff.strftime("%H:%M"), "exiting only" if current else "skipping")
             target = 0
         target = self._apply_news_veto(sym, target, current, row, now)
         if target != current:
-            reason = "golden cross" if row["signal"] > 0 else "death cross"
-            self.broker.set_target(sym, target, reason)
+            self.broker.set_target(sym, target, what if row["signal"] != 0 else "trend join")
 
     # ---------- news veto ----------
     def set_news_vetoes(self, analysis: dict | None) -> None:
@@ -423,6 +436,8 @@ def main() -> None:
              f"Rs {s.max_capital_per_trade:.0f}" if s.max_capital_per_trade else "no limit",
              f"Rs {s.max_total_capital:.0f}" if s.max_total_capital else "no limit",
              f"Rs {s.max_daily_loss:.0f}" if s.max_daily_loss else "no limit")
+    log.info("Entries: fresh crossovers%s", f" + join young trends (crossover within {s.join_max_age} candles, "
+             "same direction as the market, once per stock per day)" if s.join_young_trends else " only")
     log.info("Direction: %s", "LONG + SHORT (shorts open on death crosses)" if s.allow_short
              else "LONG only (set ALLOW_SHORT=true to enable shorts)")
     log.info("Sizing: %s%s%s",
