@@ -12,11 +12,13 @@ from datetime import datetime
 from kiteconnect import KiteConnect
 
 from config import IST, LOG_DIR, STATE_DIR, Settings
+from charges import order_charges
 from data import with_retry
 from sizing import fit_to_funds, position_size
 
 log = logging.getLogger(__name__)
 TRADES_CSV = LOG_DIR / "trades.csv"
+TRADE_COLUMNS = ["time", "mode", "symbol", "side", "qty", "price", "reason", "realized_pnl", "charges", "net_pnl"]
 ORDER_FILL_TIMEOUT = 30  # seconds to wait for a limit order to fill before cancelling
 
 
@@ -340,13 +342,19 @@ class Broker:
         with TRADES_CSV.open("a", newline="") as f:
             w = csv.writer(f)
             if new_file:
-                w.writerow(["time", "mode", "symbol", "side", "qty", "price", "reason", "realized_pnl"])
+                w.writerow(TRADE_COLUMNS)
             elif new_day:
                 f.write("\r\n")
+            # estimated Zerodha charges for this order; net_pnl = realized_pnl - charges, so summing
+            # net_pnl over a day gives the result after all charges (opening orders show -charges)
+            ch = order_charges(qty * price, side, self.s.product)
             w.writerow([now.isoformat(timespec="seconds"), self.mode, sym,
-                        side, qty, f"{price:.2f}", reason, f"{pnl:.2f}"])
+                        side, qty, f"{price:.2f}", reason, f"{pnl:.2f}", f"{ch:.2f}", f"{pnl - ch:.2f}"])
         if pnl:
-            log.info("%s realized P&L: %.2f", sym, pnl)
+            log.info("%s realized P&L: %.2f (after est. charges: %.2f)", sym, pnl,
+                     pnl - ch - getattr(self, "_open_charges", {}).pop(sym, 0.0))
+        else:
+            self.__dict__.setdefault("_open_charges", {})[sym] = ch
 
     def square_off_all(self, reason: str = "square-off") -> None:
         for sym, pos in list(self.positions.items()):

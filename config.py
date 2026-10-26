@@ -70,6 +70,7 @@ class Settings:
     paper_trading: bool
     max_trades_per_day: int
     news_mode: str
+    keep_days: int
 
     @property
     def news_briefing(self) -> bool:
@@ -119,6 +120,7 @@ def load_settings() -> Settings:
         target_pct=float(os.getenv("TARGET_PCT", "0")),
         paper_trading=_bool("PAPER_TRADING", "true"),
         max_trades_per_day=int(os.getenv("MAX_TRADES_PER_DAY", "10")),
+        keep_days=int(os.getenv("KEEP_DAYS", "0")),
         news_mode=(os.getenv("NEWS_MODE", "").strip().lower()
                    or ("advisory" if _bool("NEWS_BRIEFING", "false") else "off")),
     )
@@ -151,6 +153,8 @@ def _validate(s: Settings) -> None:
         raise ValueError("MARKET_NEUTRAL_PCT must be between 0 and 5 (percent)")
     if s.market_filter and s.market_ma_period < 2:
         raise ValueError("MARKET_MA_PERIOD must be >= 2")
+    if s.keep_days < 0:
+        raise ValueError("KEEP_DAYS must be >= 0 (0 = keep everything)")
     if s.news_mode not in ("off", "advisory", "veto"):
         raise ValueError("NEWS_MODE must be off, advisory or veto")
     if s.join_young_trends and not 1 <= s.join_max_age <= 50:

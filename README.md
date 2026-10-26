@@ -27,6 +27,8 @@ python main.py                                   # run the bot (paper mode by de
 | `data.py` | Instrument lookup, historical candles |
 | `strategy.py` | SMA/EMA crossover signals (shared by backtest + live) |
 | `broker.py` | Paper/live orders, position tracking, `logs/trades.csv` |
+| `housekeeping.py` | Removes logs and CSV rows older than `KEEP_DAYS` at startup |
+| `charges.py` | Estimated Zerodha charges per order (brokerage, STT, exchange, SEBI, stamp duty, GST) |
 | `backtest.py` | Backtest with next-candle-open fills and costs |
 | `main.py` | Live loop: runs at every candle close, MIS square-off |
 | `ticker.py` | WebSocket live prices for instant stop-loss / target exits |
@@ -116,6 +118,18 @@ activity** (turnover against each stock's own 20-day average, scaled to the time
 it uses live quotes for today so far; otherwise it shows the last session. Options: `--top 30`, `--csv`.
 It's read-only and for information only: the bot doesn't trade from it. The first run each day takes about a
 minute to build the 20-day baseline; later runs take seconds.
+
+## Charges in trades.csv
+Each row of `logs/trades.csv` has `charges` (the estimated Zerodha charges for that order, from `charges.py`) and
+`net_pnl` = `realized_pnl` - `charges`. Opening orders show their charges as a small negative `net_pnl`, so **the sum
+of `net_pnl` for a day is the result after all charges**. Slippage isn't included. Check the rates in `charges.py`
+against Zerodha's brokerage calculator from time to time.
+
+## Housekeeping (KEEP_DAYS)
+With `KEEP_DAYS=14`, each time the bot starts it permanently deletes log files older than 14 days (daily bot logs,
+news briefings, watchlists, `scan.py --csv` outputs, backtest CSVs, trades backups) and removes older rows from
+`trades.csv` and `news_vetoes.csv`. The two CSV files themselves are kept, and `state/` is never touched.
+`KEEP_DAYS=0` keeps everything.
 
 ## Going live
 1. Paper trade for a few weeks and review `logs/trades.csv` and `logs/bot_*.log`.

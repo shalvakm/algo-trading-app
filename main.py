@@ -424,7 +424,10 @@ def todays_symbols(s: Settings) -> Settings:
 
 def main() -> None:
     setup_logging()
-    s = todays_symbols(load_settings())
+    base = load_settings()
+    from housekeeping import cleanup
+    cleanup(base.keep_days)  # remove logs and CSV rows older than KEEP_DAYS
+    s = todays_symbols(base)
 
     banner = "PAPER TRADING (no real orders)" if s.paper_trading else "LIVE TRADING - REAL MONEY"
     log.info("=" * 60)
