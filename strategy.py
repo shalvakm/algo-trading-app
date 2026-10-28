@@ -114,3 +114,43 @@ def young_trend_joins(sig_df: pd.DataFrame, market: pd.Series | None, max_age: i
         cand &= trend == market.reindex(sig_df.index)
     first = cand & (cand.groupby(sig_df.index.date).cumsum() == 1)
     return trend.where(first, 0).astype(int)
+
+
+# ---------- stops sized to each stock's movement (STOP_MODE) ----------
+def atr_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Average true range: the stock's typical candle-to-candle movement."""
+    prev = df["close"].shift()
+    tr = pd.concat([df["high"] - df["low"], (df["high"] - prev).abs(), (df["low"] - prev).abs()], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
+
+
+def stop_distance(entry: float, direction: int, mode: str, stop_pct: float, atr_value: float | None = None,
+                  swing_low: float | None = None, swing_high: float | None = None, atr_mult: float = 2.0,
+                  min_pct: float = 0.5, max_pct: float = 5.0) -> float | None:
+    """Rupees per share between entry and the stop-loss (None = no stop).
+
+    fixed: STOP_LOSS_PCT of entry
+    atr:   ATR_MULT x the ATR of the signal candle
+    swing: just beyond the lowest low (long) / highest high (short) of the last SWING_BARS candles
+    atr/swing distances are kept between STOP_MIN_PCT and STOP_MAX_PCT of the entry price.
+    """
+    if mode == "fixed":
+        return entry * stop_pct / 100 if stop_pct > 0 else None
+    if mode == "atr":
+        dist = atr_mult * atr_value if atr_value and atr_value == atr_value else entry * stop_pct / 100
+    else:
+        level = swing_low if direction > 0 else swing_high
+        dist = (entry - level if direction > 0 else level - entry) * 1.0005 if level and level == level else entry * stop_pct / 100
+    return min(max(dist, entry * min_pct / 100), entry * max_pct / 100)
+
+
+def trade_levels(entry: float, direction: int, dist: float | None, mode: str, target_r: float,
+                 target_pct: float) -> tuple[float | None, float | None]:
+    """Stop-loss and target prices for a new position. fixed mode uses TARGET_PCT;
+    atr/swing use TARGET_R x the stop distance (0 = no target: exit on crossover / stop / square-off)."""
+    stop = entry - direction * dist if dist else None
+    if mode == "fixed":
+        target = entry * (1 + direction * target_pct / 100) if target_pct > 0 else None
+    else:
+        target = entry + direction * target_r * dist if (target_r > 0 and dist) else None
+    return stop, target

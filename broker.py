@@ -15,6 +15,7 @@ from config import IST, LOG_DIR, STATE_DIR, Settings
 from charges import order_charges
 from data import with_retry
 from sizing import fit_to_funds, position_size
+from strategy import trade_levels
 
 log = logging.getLogger(__name__)
 TRADES_CSV = LOG_DIR / "trades.csv"
@@ -86,7 +87,7 @@ class Broker:
         key = f"{self.s.exchange}:{sym}"
         return float(with_retry(self.kite.ltp, [key])[key]["last_price"])
 
-    def set_target(self, sym: str, target_dir: int, reason: str) -> None:
+    def set_target(self, sym: str, target_dir: int, reason: str, stop_pct: float | None = None) -> None:
         """Moves the position in `sym` to target_dir (+1 long / 0 flat / -1 short).
 
         A reversal (long -> short) is done as close, then a freshly sized open.
@@ -116,7 +117,8 @@ class Broker:
 
         ltp = self.ltp(sym)
         side = "BUY" if target_dir > 0 else "SELL"
-        qty = position_size(ltp, self.s)
+        stop_pct = stop_pct or self.s.stop_loss_pct  # this trade's stop distance (% of price)
+        qty = position_size(ltp, self.s, stop_pct)
         if qty == 0:
             log.warning("%s: 1 share @ %.2f exceeds MAX_CAPITAL_PER_TRADE (%.0f), skipping",
                         sym, ltp, self.s.max_capital_per_trade)
@@ -135,11 +137,11 @@ class Broker:
         if fitted < qty:
             log.warning("%s: funds only allow %d of %d shares (need %.0f, available %.0f)",
                         sym, fitted, qty, required, available)
-        risk = fitted * ltp * self.s.stop_loss_pct / 100 if self.s.stop_loss_pct else None
+        risk = fitted * ltp * stop_pct / 100 if stop_pct else None
         log.info("%s: sizing %d shares @ ~%.2f = %.0f value%s", sym, fitted, ltp, fitted * ltp,
                  f", risk to stop ~{risk:.0f}" if risk else "")
         self._execute(sym, target_dir * fitted, reason, opening=True, ltp=ltp,
-                      margin_per_share=required / qty)
+                      margin_per_share=required / qty, stop_pct=stop_pct)
 
     # ---------- money limits ----------
     def open_exposure(self) -> float:
@@ -220,7 +222,7 @@ class Broker:
             return qty * price
 
     def _execute(self, sym: str, signed_qty: int, reason: str, opening: bool,
-                 ltp: float | None = None, margin_per_share: float = 0.0) -> None:
+                 ltp: float | None = None, margin_per_share: float = 0.0, stop_pct: float | None = None) -> None:
         side = "BUY" if signed_qty > 0 else "SELL"
         qty = abs(signed_qty)
         ltp = ltp if ltp is not None else self.ltp(sym)
@@ -239,8 +241,16 @@ class Broker:
         pos = self.positions[sym]
         if opening:
             pos["margin"] = pos.get("margin", 0.0) * (old_qty != 0) + margin_per_share * filled_qty
+            # this position's own stop-loss / target prices, from the actual fill price
+            d = 1 if pos["qty"] > 0 else -1
+            dist = fill_price * stop_pct / 100 if stop_pct else None
+            pos["stop"], pos["target"] = trade_levels(fill_price, d, dist, self.s.stop_mode,
+                                                      self.s.target_r, self.s.target_pct)
+            log.info("%s: stop %s | target %s", sym, f"{pos['stop']:.2f}" if pos["stop"] else "none",
+                     f"{pos['target']:.2f}" if pos["target"] else "none (exit on crossover / stop / 15:15)")
         elif pos["qty"] == 0:
             pos["margin"] = 0.0
+            pos.pop("stop", None); pos.pop("target", None)
         elif old_qty:
             pos["margin"] = pos.get("margin", abs(old_qty) * pos["avg_price"]) * abs(pos["qty"]) / abs(old_qty)
         self.realized_today += pnl

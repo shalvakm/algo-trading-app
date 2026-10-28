@@ -14,7 +14,7 @@ import threading
 from datetime import datetime
 
 from config import IST, LOG_DIR, STATE_DIR, Settings
-from strategy import exit_levels
+from strategy import exit_levels, trade_levels
 
 log = logging.getLogger("shadow")
 VETOES_CSV = LOG_DIR / "news_vetoes.csv"
@@ -42,11 +42,14 @@ class ShadowBook:
     def _save(self) -> None:
         OPEN_FILE.write_text(json.dumps({"date": datetime.now(IST).date().isoformat(), "open": self.open}, indent=2))
 
-    def start(self, sym: str, direction: int, price: float, qty: int, when: datetime, reason: str) -> None:
+    def start(self, sym: str, direction: int, price: float, qty: int, when: datetime, reason: str,
+              stop_pct: float | None = None) -> None:
         with self._lock:
             if sym in self.open or qty <= 0:
                 return
-            self.open[sym] = {"direction": direction, "entry": price, "qty": qty,
+            dist = price * stop_pct / 100 if stop_pct else None
+            stop, target = trade_levels(price, direction, dist, self.s.stop_mode, self.s.target_r, self.s.target_pct)
+            self.open[sym] = {"direction": direction, "entry": price, "qty": qty, "stop": stop, "target": target,
                               "entry_time": when.isoformat(timespec="seconds"), "reason": reason}
             self._save()
         log.info("Shadow: tracking vetoed %s %s x%d @ %.2f", "LONG" if direction > 0 else "SHORT", sym, qty, price)
@@ -58,7 +61,10 @@ class ShadowBook:
             if not pos:
                 return
             d = pos["direction"]
-            stop, target = exit_levels(pos["entry"], d, self.s.stop_loss_pct, self.s.target_pct)
+            if "stop" in pos:
+                stop, target = pos["stop"], pos["target"]
+            else:
+                stop, target = exit_levels(pos["entry"], d, self.s.stop_loss_pct, self.s.target_pct)
             hi, lo = float(candle["high"]), float(candle["low"])
             if stop is not None and ((d > 0 and lo <= stop) or (d < 0 and hi >= stop)):
                 self._close(sym, stop, when, "stop-loss")

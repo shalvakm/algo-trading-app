@@ -98,6 +98,14 @@ to `logs/news_vetoes.csv`; run `python shadow.py` to see whether the vetoes save
 One-time setup: install the Claude Code CLI, then run `claude` once in a terminal and log in with your
 Claude account. If `claude` isn't on your PATH, set `CLAUDE_CLI_PATH` in `.env`.
 
+## Stops sized to each stock (STOP_MODE)
+`STOP_MODE=atr` sets each trade's stop at `ATR_MULT` (2) x the stock's average hourly movement from the entry
+price, kept between `STOP_MIN_PCT` and `STOP_MAX_PCT`. Position size = `RISK_PER_TRADE` / stop distance (still capped by
+`MAX_CAPITAL_PER_TRADE`), so volatile stocks get smaller positions and every trade risks about the same rupees.
+`TARGET_R` sets a target at that multiple of the stop distance; 0 = no target (exit on the opposite crossover, the
+stop or 15:15). Each position's stop/target is stored when it opens and watched live. `swing` uses the last
+`SWING_BARS` candles' low/high instead; `fixed` uses `STOP_LOSS_PCT`/`TARGET_PCT`. Backtest: `--stop-mode atr --target-r 0`.
+
 ## Joining young trends (JOIN_YOUNG_TRENDS)
 Besides fresh crossovers, the bot can also enter a stock whose trend started within the last `JOIN_MAX_AGE`
 candles (7 x 60-min = about one trading day) and points the same way as the market. At most one join per stock

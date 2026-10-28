@@ -25,7 +25,8 @@ import pandas as pd
 
 from config import IST, LOG_DIR, load_settings
 from sizing import position_size
-from strategy import add_signals, exit_levels, market_allows, market_trend, target_position, young_trend_joins
+from strategy import (add_signals, atr_series, market_allows, market_trend, stop_distance, target_position,
+                      trade_levels, young_trend_joins)
 
 
 def run_backtest(df: pd.DataFrame, fast: int, slow: int, ma_type: str, allow_short: bool,
@@ -33,8 +34,13 @@ def run_backtest(df: pd.DataFrame, fast: int, slow: int, ma_type: str, allow_sho
                  stop_loss_pct: float = 0.0, target_pct: float = 0.0,
                  size_fn=None, capital: float = 0.0,
                  no_entries_after=None, market_dir: pd.Series | None = None,
-                 join_max_age: int = 0, entries_from=None) -> tuple[pd.DataFrame, dict]:
+                 join_max_age: int = 0, entries_from=None, stop_mode: str = "fixed", atr_mult: float = 2.0,
+                 atr_period: int = 14, swing_bars: int = 5, target_r: float = 0.0,
+                 stop_min_pct: float = 0.5, stop_max_pct: float = 5.0) -> tuple[pd.DataFrame, dict]:
     df = add_signals(df, fast, slow, ma_type)
+    df["atr"] = atr_series(df, atr_period)
+    df["swing_lo"] = df["low"].rolling(swing_bars, min_periods=1).min()
+    df["swing_hi"] = df["high"].rolling(swing_bars, min_periods=1).max()
     # market direction (+1/-1) at each candle's close; missing -> NaN -> blocks entries
     market = market_dir.reindex(df.index) if market_dir is not None else None
     if join_max_age:  # JOIN_YOUNG_TRENDS: treat a young, market-aligned trend as an entry signal
@@ -44,6 +50,8 @@ def run_backtest(df: pd.DataFrame, fast: int, slow: int, ma_type: str, allow_sho
     cost = cost_pct / 100
     trades = []
     position, entry_price, entry_time, qty = 0, 0.0, None, 0
+    cur_stop = cur_target = None
+    prev = None  # previous (signal) candle - stops are based on what was known when the signal fired
     total_pnl = gross_pnl = total_costs = 0.0
     skipped = 0
     pending = None  # target position to execute at next open
@@ -68,6 +76,10 @@ def run_backtest(df: pd.DataFrame, fast: int, slow: int, ma_type: str, allow_sho
         })
         position = 0
 
+    # Kite's candles can stop before 15:15 (e.g. the last hourly candle is 14:15-15:15), so intraday
+    # positions are closed at the close of each day's LAST candle, not only on a candle starting at 15:15
+    last_of_day = pd.Series(df.index.date, index=df.index)
+    last_of_day = last_of_day != last_of_day.shift(-1)
     for ts, bar in df.iterrows():
         after_cutoff = intraday and ts.time() >= square_off_time
 
@@ -80,11 +92,24 @@ def run_backtest(df: pd.DataFrame, fast: int, slow: int, ma_type: str, allow_sho
             if position != 0:
                 close_trade(bar["open"], ts, "crossover")
             if pending != 0:
-                q = size_fn(bar["open"]) if size_fn else 1
+                dist = stop_distance(bar["open"], pending, stop_mode, stop_loss_pct,
+                                     prev["atr"] if prev is not None else None,
+                                     prev["swing_lo"] if prev is not None else None,
+                                     prev["swing_hi"] if prev is not None else None,
+                                     atr_mult, stop_min_pct, stop_max_pct)
+                stop_pct_trade = dist / bar["open"] * 100 if dist else None
+                if size_fn:
+                    try:
+                        q = size_fn(bar["open"], stop_pct_trade)
+                    except TypeError:
+                        q = size_fn(bar["open"])
+                else:
+                    q = 1
                 if capital > 0:
                     q = min(q, math.floor((capital + total_pnl) / bar["open"]))
                 if q > 0:
                     position, entry_price, entry_time, qty = pending, bar["open"], ts, q
+                    cur_stop, cur_target = trade_levels(entry_price, position, dist, stop_mode, target_r, target_pct)
                 else:
                     skipped += 1
         pending = None
@@ -93,11 +118,12 @@ def run_backtest(df: pd.DataFrame, fast: int, slow: int, ma_type: str, allow_sho
         if after_cutoff:
             if position != 0:
                 close_trade(bar["open"], ts, "square-off")
+            prev = bar
             continue
 
-        # 3. stop-loss / target inside this candle
+        # 3. stop-loss / target inside this candle (levels fixed when the position opened)
         if position != 0:
-            stop, target = exit_levels(entry_price, position, stop_loss_pct, target_pct)
+            stop, target = cur_stop, cur_target
             if position > 0:
                 stop_hit = stop is not None and bar["low"] <= stop
                 target_hit = target is not None and bar["high"] >= target
@@ -119,6 +145,13 @@ def run_backtest(df: pd.DataFrame, fast: int, slow: int, ma_type: str, allow_sho
             if market is not None and not market_allows(pending, position, market.get(ts)):
                 pending = 0
                 blocked += 1
+
+        # 5. end of the trading day: intraday positions are squared off, nothing carries overnight
+        if intraday and last_of_day[ts]:
+            if position != 0:
+                close_trade(bar["close"], ts, "square-off")
+            pending = None
+        prev = bar
 
     if position != 0:
         close_trade(df["close"].iloc[-1], df.index[-1], "end of data")
@@ -182,6 +215,9 @@ def main():
     p.add_argument("--join-young", action=argparse.BooleanOptionalAction, default=s.join_young_trends,
                    help="also join young trends that agree with the market")
     p.add_argument("--join-age", type=int, default=s.join_max_age, help="max candles since the crossover")
+    p.add_argument("--stop-mode", default=s.stop_mode, choices=["fixed", "atr", "swing"])
+    p.add_argument("--atr-mult", type=float, default=s.atr_mult)
+    p.add_argument("--target-r", type=float, default=s.target_r, help="target as a multiple of the stop distance (0 = none)")
     p.add_argument("--csv", help="backtest a local OHLC CSV instead of fetching from Kite")
     a = p.parse_args()
 
@@ -223,11 +259,13 @@ def main():
     trades, stats = run_backtest(df, a.fast, a.slow, a.ma_type, a.allow_short,
                                  intraday, s.square_off_time, a.cost_pct,
                                  a.stop_loss_pct, a.target_pct,
-                                 size_fn=lambda price: position_size(price, sizing),
+                                 size_fn=lambda price, sp=None: position_size(price, sizing, sp),
                                  capital=a.capital,
                                  no_entries_after=s.no_new_entries_after if a.interval != "day" else None,
                                  market_dir=market_dir, join_max_age=a.join_age if a.join_young else 0,
-                                 entries_from=entries_from)
+                                 entries_from=entries_from, stop_mode=a.stop_mode, atr_mult=a.atr_mult,
+                                 atr_period=s.atr_period, swing_bars=s.swing_bars, target_r=a.target_r,
+                                 stop_min_pct=s.stop_min_pct, stop_max_pct=s.stop_max_pct)
 
     print(f"\n=== Backtest: {label} | {a.ma_type} {a.fast}/{a.slow} | "
           f"{'intraday' if intraday else 'positional'}"

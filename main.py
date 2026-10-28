@@ -25,7 +25,7 @@ from broker import Broker
 from config import IST, LOG_DIR, MARKET_CLOSE, MARKET_OPEN, STATE_DIR, Settings, load_settings
 from data import NETWORK_ERRORS, recent_closed_candles, resolve_index_token, resolve_instruments
 from strategy import (add_signals, exit_levels, exit_reason, market_allows, market_trend,
-                      min_candles_needed, target_position, trend_age)
+                      min_candles_needed, target_position, trend_age, atr_series, stop_distance)
 from shadow import ShadowBook
 from sizing import position_size
 from ticker import TickerFeed
@@ -132,7 +132,10 @@ class Bot:
         if not pos or not pos["qty"]:
             return None
         direction = 1 if pos["qty"] > 0 else -1
-        stop, target = exit_levels(pos["avg_price"], direction, self.s.stop_loss_pct, self.s.target_pct)
+        if "stop" in pos:  # levels stored when the position was opened
+            stop, target = pos.get("stop"), pos.get("target")
+        else:              # positions opened before per-trade stops existed
+            stop, target = exit_levels(pos["avg_price"], direction, self.s.stop_loss_pct, self.s.target_pct)
         return exit_reason(price, direction, stop, target)
 
     def on_price(self, sym: str, price: float) -> None:
@@ -226,6 +229,14 @@ class Bot:
         sig = add_signals(df, self.s.fast_period, self.s.slow_period, self.s.ma_type)
         row = sig.iloc[-1].copy()
         row["join"], row["age"] = 0, int(trend_age(sig).iloc[-1])
+        # each side's stop distance (% of price) if a position opens on this candle
+        atr_v = float(atr_series(sig, self.s.atr_period).iloc[-1])
+        swing = sig.tail(self.s.swing_bars)
+        for side, d in (("long", 1), ("short", -1)):
+            dist = stop_distance(float(row["close"]), d, self.s.stop_mode, self.s.stop_loss_pct, atr_v,
+                                 float(swing["low"].min()), float(swing["high"].max()), self.s.atr_mult,
+                                 self.s.stop_min_pct, self.s.stop_max_pct)
+            row[f"stop_pct_{side}"] = dist / float(row["close"]) * 100 if dist else 0.0
         if self.s.join_young_trends and row["signal"] == 0 and row["slow_ma"] == row["slow_ma"]:
             trend = 1 if row["fast_ma"] > row["slow_ma"] else -1
             aligned = (not self.s.market_filter) or self.market_dir == trend
@@ -272,7 +283,9 @@ class Bot:
             target = 0
         target = self._apply_news_veto(sym, target, current, row, now)
         if target != current:
-            self.broker.set_target(sym, target, what if row["signal"] != 0 else "trend join")
+            self.broker.set_target(sym, target, what if row["signal"] != 0 else "trend join",
+                                   stop_pct=float(row.get(f"stop_pct_{'long' if target > 0 else 'short'}", 0)) or None
+                                   if target != 0 else None)
 
     # ---------- news veto ----------
     def set_news_vetoes(self, analysis: dict | None) -> None:
@@ -304,7 +317,8 @@ class Bot:
                 price = self.broker.ltp(sym)
             except Exception:
                 price = float(row["close"])
-            self.shadow.start(sym, target, price, position_size(price, self.s), now, reason)
+            sp = float(row.get(f"stop_pct_{'long' if target > 0 else 'short'}", 0)) or self.s.stop_loss_pct
+            self.shadow.start(sym, target, price, position_size(price, self.s, sp), now, reason, stop_pct=sp)
         return 0
 
     def update_market(self) -> None:
@@ -454,9 +468,13 @@ def main() -> None:
              if s.market_filter else "off")
     log.info("News briefing: %s", {"off": "off", "advisory": "on (once per day at startup, advisory only)",
                                     "veto": "on, VETO mode (briefing can block new trades; shadow-tracked)"}[s.news_mode])
-    log.info("Live-tick exits: stop-loss=%s target=%s",
-             f"{s.stop_loss_pct}%" if s.stop_loss_pct else "off",
-             f"{s.target_pct}%" if s.target_pct else "off")
+    if s.stop_mode == "fixed":
+        log.info("Stops: fixed | stop-loss=%s target=%s", f"{s.stop_loss_pct}%" if s.stop_loss_pct else "off",
+                 f"{s.target_pct}%" if s.target_pct else "off")
+    else:
+        log.info("Stops: %s (%s, kept within %s-%s%% of price) | target %s", s.stop_mode,
+                 f"{s.atr_mult}x ATR({s.atr_period})" if s.stop_mode == "atr" else f"last {s.swing_bars} candles' low/high",
+                 s.stop_min_pct, s.stop_max_pct, f"{s.target_r}R" if s.target_r else "none (exit on crossover / stop / 15:15)")
     log.info("=" * 60)
 
     if not s.paper_trading and "--yes" not in sys.argv:

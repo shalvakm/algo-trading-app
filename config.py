@@ -67,6 +67,13 @@ class Settings:
     join_max_age: int
     stop_loss_pct: float
     target_pct: float
+    stop_mode: str
+    atr_mult: float
+    atr_period: int
+    swing_bars: int
+    target_r: float
+    stop_min_pct: float
+    stop_max_pct: float
     paper_trading: bool
     max_trades_per_day: int
     news_mode: str
@@ -78,7 +85,7 @@ class Settings:
 
     @property
     def tick_exits_enabled(self) -> bool:
-        return self.stop_loss_pct > 0 or self.target_pct > 0
+        return self.stop_mode != "fixed" or self.stop_loss_pct > 0 or self.target_pct > 0
 
     @property
     def interval_minutes(self) -> int:
@@ -118,6 +125,13 @@ def load_settings() -> Settings:
         no_new_entries_after=_time("NO_NEW_ENTRIES_AFTER", "") if os.getenv("NO_NEW_ENTRIES_AFTER", "").strip() else None,
         stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "0")),
         target_pct=float(os.getenv("TARGET_PCT", "0")),
+        stop_mode=os.getenv("STOP_MODE", "fixed").strip().lower(),
+        atr_mult=float(os.getenv("ATR_MULT", "2")),
+        atr_period=int(os.getenv("ATR_PERIOD", "14")),
+        swing_bars=int(os.getenv("SWING_BARS", "5")),
+        target_r=float(os.getenv("TARGET_R", "0")),
+        stop_min_pct=float(os.getenv("STOP_MIN_PCT", "0.5")),
+        stop_max_pct=float(os.getenv("STOP_MAX_PCT", "5")),
         paper_trading=_bool("PAPER_TRADING", "true"),
         max_trades_per_day=int(os.getenv("MAX_TRADES_PER_DAY", "10")),
         keep_days=int(os.getenv("KEEP_DAYS", "0")),
@@ -163,7 +177,11 @@ def _validate(s: Settings) -> None:
         raise ValueError("STOP_LOSS_PCT and TARGET_PCT must be >= 0 (0 = disabled)")
     if min(s.risk_per_trade, s.max_capital_per_trade, s.max_total_capital, s.max_daily_loss) < 0:
         raise ValueError("RISK_PER_TRADE, MAX_CAPITAL_PER_TRADE, MAX_TOTAL_CAPITAL and MAX_DAILY_LOSS must be >= 0")
-    if s.risk_per_trade > 0 and s.stop_loss_pct <= 0:
+    if s.stop_mode not in ("fixed", "atr", "swing"):
+        raise ValueError("STOP_MODE must be fixed, atr or swing")
+    if s.stop_mode != "fixed" and not (0 < s.stop_min_pct <= s.stop_max_pct):
+        raise ValueError("Need 0 < STOP_MIN_PCT <= STOP_MAX_PCT")
+    if s.risk_per_trade > 0 and s.stop_loss_pct <= 0 and s.stop_mode == "fixed":
         raise ValueError("RISK_PER_TRADE needs STOP_LOSS_PCT > 0 (risk is measured to the stop-loss)")
     if s.quantity < 1:
         raise ValueError("QUANTITY must be >= 1")
